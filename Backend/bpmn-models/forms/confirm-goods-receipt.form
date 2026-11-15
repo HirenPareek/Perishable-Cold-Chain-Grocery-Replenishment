@@ -1,0 +1,74 @@
+{
+  "executionPlatform": "Camunda Cloud",
+  "executionPlatformVersion": "8.5.0",
+  "exporter": {
+    "name": "Camunda Modeler",
+    "version": "5.25.0"
+  },
+  "schemaVersion": 16,
+  "id": "confirmGoodsReceipt",
+  "components": [
+    {
+      "text": "## Store Receiving: Confirm Goods Receipt & Supplier Invoice\nPlease log physical inventory counts received at the dock and supplier invoice billings for automated 3-way reconciliation.",
+      "type": "text",
+      "id": "Text_ReceiptHeader"
+    },
+    {
+      "label": "Purchase Order Number",
+      "type": "textfield",
+      "id": "Field_PONumber",
+      "key": "poNumber",
+      "disabled": true
+    },
+    {
+      "label": "Ordered Quantity (Units)",
+      "type": "number",
+      "id": "Field_OrderedQty",
+      "key": "orderedQty",
+      "disabled": true
+    },
+    {
+      "label": "Authorized PO Amount (USD)",
+      "type": "number",
+      "id": "Field_OrderedAmount",
+      "key": "orderedAmount",
+      "disabled": true
+    },
+    {
+      "label": "Actual Received Quantity (Units)",
+      "type": "number",
+      "id": "Field_ReceivedQty",
+      "key": "receivedQty",
+      "validate": {
+        "required": true,
+        "min": 0
+      }
+    },
+    {
+      "label": "Supplier Invoice Number",
+      "type": "textfield",
+      "id": "Field_InvoiceNumber",
+      "key": "invoiceNumber",
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "label": "Supplier Invoiced Total Amount (USD)",
+      "type": "number",
+      "id": "Field_InvoiceAmount",
+      "key": "invoiceAmount",
+      "validate": {
+        "required": true,
+        "min": 0
+      }
+    },
+    {
+      "label": "Receiving Dock Notes",
+      "type": "textarea",
+      "id": "Field_ReceiptNotes",
+      "key": "receiptNotes"
+    }
+  ],
+  "type": "default"
+}

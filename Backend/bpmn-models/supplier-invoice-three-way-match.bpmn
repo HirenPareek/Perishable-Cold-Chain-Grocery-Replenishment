@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_SupplierInvoiceThreeWayMatch"
+                  targetNamespace="http://bpmn.io/schema/bpmn"
+                  exporter="Camunda Modeler"
+                  exporterVersion="5.25.0">
+  <bpmn:process id="supplierInvoiceThreeWayMatch" name="Supplier Invoice Three-Way Match" isExecutable="true">
+    
+    <!-- Start Event -->
+    <bpmn:startEvent id="StartEvent_InvoiceMatch" name="Invoice Match Requested">
+      <bpmn:outgoing>Flow_StartToEvaluate</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <!-- Step 1: Script Task - Evaluate Match Conditions -->
+    <bpmn:scriptTask id="Task_EvaluateMatch" name="Evaluate Three-Way Match">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=(receivedQty = orderedQty) and (abs(invoiceAmount - orderedAmount) &lt;= (orderedAmount * 0.02))" resultVariable="isMatch" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_StartToEvaluate</bpmn:incoming>
+      <bpmn:outgoing>Flow_EvaluateToGateway</bpmn:outgoing>
+    </bpmn:scriptTask>
+
+    <!-- Step 2: Exclusive Gateway - Matched? -->
+    <bpmn:exclusiveGateway id="Gateway_IsMatched" name="Three-Way Matched?" default="Flow_MatchSuccess">
+      <bpmn:incoming>Flow_EvaluateToGateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_MatchSuccess</bpmn:outgoing>
+      <bpmn:outgoing>Flow_MatchFailure</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <!-- Matched Branch: Set Status Matched -->
+    <bpmn:scriptTask id="Task_SetMatched" name="Set Status Matched">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=&#34;MATCHED&#34;" resultVariable="matchStatus" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_MatchSuccess</bpmn:incoming>
+      <bpmn:outgoing>Flow_MatchedToEnd</bpmn:outgoing>
+    </bpmn:scriptTask>
+
+    <!-- Matched End Event -->
+    <bpmn:endEvent id="EndEvent_Matched" name="Invoice Matched">
+      <bpmn:incoming>Flow_MatchedToEnd</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Mismatch Branch: AP Clerk Manual Review -->
+    <bpmn:userTask id="Task_APClerkReview" name="AP Clerk Manual Review">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="apClerkManualReview" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=poNumber" target="poNumber" />
+          <zeebe:input source="=orderedQty" target="orderedQty" />
+          <zeebe:input source="=orderedAmount" target="orderedAmount" />
+          <zeebe:input source="=receivedQty" target="receivedQty" />
+          <zeebe:input source="=invoiceAmount" target="invoiceAmount" />
+          <zeebe:input source="=invoiceNumber" target="invoiceNumber" />
+          <zeebe:input source="=abs(invoiceAmount - orderedAmount)" target="amountVariance" />
+          <zeebe:input source="=orderedQty - receivedQty" target="quantityVariance" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_MatchFailure</bpmn:incoming>
+      <bpmn:outgoing>Flow_APReviewToGateway</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <!-- Exclusive Gateway - AP Decision -->
+    <bpmn:exclusiveGateway id="Gateway_APDecision" name="AP Decision Approved?" default="Flow_APDisputed">
+      <bpmn:incoming>Flow_APReviewToGateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_APApproved</bpmn:outgoing>
+      <bpmn:outgoing>Flow_APDisputed</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <!-- AP Approved Branch: Set Status Manually Approved -->
+    <bpmn:scriptTask id="Task_SetManuallyApproved" name="Set Status Manually Approved">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=&#34;MANUALLY_APPROVED&#34;" resultVariable="matchStatus" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_APApproved</bpmn:incoming>
+      <bpmn:outgoing>Flow_ApprovedToEnd</bpmn:outgoing>
+    </bpmn:scriptTask>
+
+    <!-- AP Approved End Event -->
+    <bpmn:endEvent id="EndEvent_ManuallyApproved" name="Invoice Manually Approved">
+      <bpmn:incoming>Flow_ApprovedToEnd</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- AP Disputed Branch: Set Status Disputed -->
+    <bpmn:scriptTask id="Task_SetDisputed" name="Set Status Disputed">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=&#34;DISPUTED&#34;" resultVariable="matchStatus" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_APDisputed</bpmn:incoming>
+      <bpmn:outgoing>Flow_DisputedToEnd</bpmn:outgoing>
+    </bpmn:scriptTask>
+
+    <!-- AP Disputed End Event -->
+    <bpmn:endEvent id="EndEvent_Disputed" name="Invoice Disputed">
+      <bpmn:incoming>Flow_DisputedToEnd</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Sequence Flows -->
+    <bpmn:sequenceFlow id="Flow_StartToEvaluate" sourceRef="StartEvent_InvoiceMatch" targetRef="Task_EvaluateMatch" />
+    <bpmn:sequenceFlow id="Flow_EvaluateToGateway" sourceRef="Task_EvaluateMatch" targetRef="Gateway_IsMatched" />
+    <bpmn:sequenceFlow id="Flow_MatchSuccess" name="Qty Equal &amp; Variance &lt;= 2%" sourceRef="Gateway_IsMatched" targetRef="Task_SetMatched" />
+    <bpmn:sequenceFlow id="Flow_MatchFailure" name="Mismatch Detected" sourceRef="Gateway_IsMatched" targetRef="Task_APClerkReview">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=isMatch = false</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_MatchedToEnd" sourceRef="Task_SetMatched" targetRef="EndEvent_Matched" />
+    <bpmn:sequenceFlow id="Flow_APReviewToGateway" sourceRef="Task_APClerkReview" targetRef="Gateway_APDecision" />
+    <bpmn:sequenceFlow id="Flow_APApproved" name="Approve Override" sourceRef="Gateway_APDecision" targetRef="Task_SetManuallyApproved">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=apDecision = "APPROVE"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_APDisputed" name="Dispute Invoice" sourceRef="Gateway_APDecision" targetRef="Task_SetDisputed" />
+    <bpmn:sequenceFlow id="Flow_ApprovedToEnd" sourceRef="Task_SetManuallyApproved" targetRef="EndEvent_ManuallyApproved" />
+    <bpmn:sequenceFlow id="Flow_DisputedToEnd" sourceRef="Task_SetDisputed" targetRef="EndEvent_Disputed" />
+
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_SupplierInvoiceThreeWayMatch">
+    <bpmndi:BPMNPlane id="BPMNPlane_SupplierInvoiceThreeWayMatch" bpmnElement="supplierInvoiceThreeWayMatch">
+      
+      <!-- Shapes -->
+      <bpmndi:BPMNShape id="Shape_StartEvent_InvoiceMatch" bpmnElement="StartEvent_InvoiceMatch">
+        <dc:Bounds x="182" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="163" y="185" width="75" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_EvaluateMatch" bpmnElement="Task_EvaluateMatch">
+        <dc:Bounds x="270" y="120" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_IsMatched" bpmnElement="Gateway_IsMatched" isMarkerVisible="true">
+        <dc:Bounds x="455" y="135" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="452" y="105" width="56" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetMatched" bpmnElement="Task_SetMatched">
+        <dc:Bounds x="570" y="60" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_Matched" bpmnElement="EndEvent_Matched">
+        <dc:Bounds x="762" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="740" y="125" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_APClerkReview" bpmnElement="Task_APClerkReview">
+        <dc:Bounds x="570" y="220" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_APDecision" bpmnElement="Gateway_APDecision" isMarkerVisible="true">
+        <dc:Bounds x="755" y="235" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="751" y="205" width="60" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetManuallyApproved" bpmnElement="Task_SetManuallyApproved">
+        <dc:Bounds x="870" y="170" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_ManuallyApproved" bpmnElement="EndEvent_ManuallyApproved">
+        <dc:Bounds x="1062" y="192" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1037" y="235" width="87" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetDisputed" bpmnElement="Task_SetDisputed">
+        <dc:Bounds x="870" y="290" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_Disputed" bpmnElement="EndEvent_Disputed">
+        <dc:Bounds x="1062" y="312" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1040" y="355" width="82" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Edges -->
+      <bpmndi:BPMNEdge id="Edge_Flow_StartToEvaluate" bpmnElement="Flow_StartToEvaluate">
+        <di:waypoint x="218" y="160" />
+        <di:waypoint x="270" y="160" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_EvaluateToGateway" bpmnElement="Flow_EvaluateToGateway">
+        <di:waypoint x="400" y="160" />
+        <di:waypoint x="455" y="160" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_MatchSuccess" bpmnElement="Flow_MatchSuccess">
+        <di:waypoint x="480" y="135" />
+        <di:waypoint x="480" y="100" />
+        <di:waypoint x="570" y="100" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="485" y="80" width="83" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_MatchFailure" bpmnElement="Flow_MatchFailure">
+        <di:waypoint x="480" y="185" />
+        <di:waypoint x="480" y="260" />
+        <di:waypoint x="570" y="260" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="495" y="240" width="53" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_MatchedToEnd" bpmnElement="Flow_MatchedToEnd">
+        <di:waypoint x="700" y="100" />
+        <di:waypoint x="762" y="100" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_APReviewToGateway" bpmnElement="Flow_APReviewToGateway">
+        <di:waypoint x="700" y="260" />
+        <di:waypoint x="755" y="260" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_APApproved" bpmnElement="Flow_APApproved">
+        <di:waypoint x="780" y="235" />
+        <di:waypoint x="780" y="210" />
+        <di:waypoint x="870" y="210" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="785" y="190" width="86" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_APDisputed" bpmnElement="Flow_APDisputed">
+        <di:waypoint x="780" y="285" />
+        <di:waypoint x="780" y="330" />
+        <di:waypoint x="870" y="330" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="786" y="337" width="77" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_ApprovedToEnd" bpmnElement="Flow_ApprovedToEnd">
+        <di:waypoint x="1000" y="210" />
+        <di:waypoint x="1062" y="210" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_DisputedToEnd" bpmnElement="Flow_DisputedToEnd">
+        <di:waypoint x="1000" y="330" />
+        <di:waypoint x="1062" y="330" />
+      </bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

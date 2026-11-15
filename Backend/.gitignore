@@ -1,0 +1,24 @@
+# Operating System files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Temporary and log files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# IDE and Editor configurations
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Runtime / Camunda process markers
+*.process
+*.lock
+camunda-data/
+log/

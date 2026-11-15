@@ -1,0 +1,56 @@
+{
+  "executionPlatform": "Camunda Cloud",
+  "executionPlatformVersion": "8.5.0",
+  "exporter": {
+    "name": "Camunda Modeler",
+    "version": "5.25.0"
+  },
+  "schemaVersion": 16,
+  "id": "qaInspection",
+  "components": [
+    {
+      "text": "## Post-Delivery QA Inspection\nTelemetry analysis revealed that the recorded transit temperature breached the critical cold-chain ceiling. Physical inspection is mandatory before goods acceptance.",
+      "type": "text",
+      "id": "Text_QAInspectHeader"
+    },
+    {
+      "label": "Purchase Order Number",
+      "type": "textfield",
+      "id": "Field_PONumber",
+      "key": "poNumber",
+      "disabled": true
+    },
+    {
+      "label": "Recorded Maximum Transit Temperature (°C)",
+      "type": "number",
+      "id": "Field_MaxTempC",
+      "key": "maxTempC",
+      "disabled": true
+    },
+    {
+      "label": "Permissible Cold-Chain Threshold (°C)",
+      "type": "number",
+      "id": "Field_MaxTransitTempC",
+      "key": "maxTransitTempC",
+      "disabled": true
+    },
+    {
+      "label": "QA Physical Inspection Passed?",
+      "type": "checkbox",
+      "id": "Field_QAInspectionPassed",
+      "key": "qaInspectionPassed",
+      "defaultValue": false,
+      "description": "Check if organoleptic and microbiological spot-checks confirm food safety despite excursion. Leave unchecked to condemn and reject shipment."
+    },
+    {
+      "label": "Inspection Report & Sensory Findings",
+      "type": "textarea",
+      "id": "Field_InspectionNotes",
+      "key": "inspectionNotes",
+      "validate": {
+        "required": true
+      }
+    }
+  ],
+  "type": "default"
+}

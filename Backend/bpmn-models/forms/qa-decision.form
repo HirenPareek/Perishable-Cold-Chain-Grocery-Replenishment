@@ -1,0 +1,61 @@
+{
+  "executionPlatform": "Camunda Cloud",
+  "executionPlatformVersion": "8.5.0",
+  "exporter": {
+    "name": "Camunda Modeler",
+    "version": "5.25.0"
+  },
+  "schemaVersion": 16,
+  "id": "qaDecision",
+  "components": [
+    {
+      "text": "## Live IoT Temperature Excursion Triage\nReal-time telemetry emitted a critical alarm indicating ambient trailer temperature exceeded 8°C in transit.",
+      "type": "text",
+      "id": "Text_ExcursionHeader"
+    },
+    {
+      "label": "Purchase Order Number",
+      "type": "textfield",
+      "id": "Field_PONumber",
+      "key": "poNumber",
+      "disabled": true
+    },
+    {
+      "label": "Cold-Chain Threshold (°C)",
+      "type": "number",
+      "id": "Field_MaxTransitTempC",
+      "key": "maxTransitTempC",
+      "disabled": true
+    },
+    {
+      "label": "QA Excursion Decision",
+      "type": "radio",
+      "id": "Field_QAExcursionDecision",
+      "key": "qaExcursionDecision",
+      "defaultValue": "ACCEPT",
+      "values": [
+        {
+          "label": "Accept Deviation (Transient breach, goods safe to continue transit)",
+          "value": "ACCEPT"
+        },
+        {
+          "label": "Reject Shipment (Critical spoilage risk, abort shipment and trigger return)",
+          "value": "REJECT"
+        }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "label": "Triage Justification & Corrective Action",
+      "type": "textarea",
+      "id": "Field_TriageNotes",
+      "key": "triageActionNotes",
+      "validate": {
+        "required": true
+      }
+    }
+  ],
+  "type": "default"
+}

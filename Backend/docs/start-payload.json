@@ -1,0 +1,34 @@
+{
+  "requestId": "REQ-1001",
+  "storeId": "STORE-12",
+  "storeManagerEmail": "manager@store.example",
+  "maxTransitTempC": 8,
+  "budgetCap": 5000,
+  "items": [
+    {
+      "sku": "MILK-1L",
+      "qty": 200
+    },
+    {
+      "sku": "YOGURT-500G",
+      "qty": 150
+    }
+  ],
+  "suppliers": [
+    {
+      "supplierId": "SUP-A",
+      "name": "Green Valley Dairy",
+      "email": "a@supplier.example"
+    },
+    {
+      "supplierId": "SUP-B",
+      "name": "Hill Farms",
+      "email": "b@supplier.example"
+    },
+    {
+      "supplierId": "SUP-C",
+      "name": "Fresh Fields",
+      "email": "c@supplier.example"
+    }
+  ]
+}

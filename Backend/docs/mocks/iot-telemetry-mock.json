@@ -1,0 +1,73 @@
+{
+  "description": "Mock responses and WireMock mappings for IoT Cold-Chain Telemetry API",
+  "endpoints": [
+    {
+      "method": "GET",
+      "urlPattern": "/api/v1/telemetry/(.*)",
+      "scenario": "Normal Cold-Chain Transit (< 8°C)",
+      "responseStatus": 200,
+      "responseHeaders": {
+        "Content-Type": "application/json"
+      },
+      "responseBody": {
+        "poNumber": "PO-REQ-1001-SUP-A",
+        "sensorDeviceId": "IOT-TRUCK-8842",
+        "maxTempC": 5.4,
+        "minTempC": 2.1,
+        "avgTempC": 3.8,
+        "transitDurationMinutes": 185,
+        "excursionDetected": false,
+        "readings": [
+          {"timestamp": "2026-11-15T10:00:00Z", "tempC": 3.2, "humidityPct": 84, "batteryPct": 98},
+          {"timestamp": "2026-11-15T11:00:00Z", "tempC": 4.1, "humidityPct": 85, "batteryPct": 97},
+          {"timestamp": "2026-11-15T12:00:00Z", "tempC": 5.4, "humidityPct": 82, "batteryPct": 96},
+          {"timestamp": "2026-11-15T13:00:00Z", "tempC": 3.9, "humidityPct": 83, "batteryPct": 95}
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "urlPattern": "/api/v1/telemetry/PO-REQ-1001-SUP-B",
+      "scenario": "Temperature Excursion Breach (> 8°C)",
+      "responseStatus": 200,
+      "responseHeaders": {
+        "Content-Type": "application/json"
+      },
+      "responseBody": {
+        "poNumber": "PO-REQ-1001-SUP-B",
+        "sensorDeviceId": "IOT-TRUCK-9912",
+        "maxTempC": 9.4,
+        "minTempC": 3.5,
+        "avgTempC": 7.1,
+        "transitDurationMinutes": 210,
+        "excursionDetected": true,
+        "readings": [
+          {"timestamp": "2026-11-15T09:00:00Z", "tempC": 3.8, "humidityPct": 82, "batteryPct": 99},
+          {"timestamp": "2026-11-15T10:30:00Z", "tempC": 8.7, "humidityPct": 78, "batteryPct": 97},
+          {"timestamp": "2026-11-15T11:00:00Z", "tempC": 9.4, "humidityPct": 76, "batteryPct": 96},
+          {"timestamp": "2026-11-15T12:30:00Z", "tempC": 6.2, "humidityPct": 80, "batteryPct": 94}
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "urlPattern": "/api/v1/telemetry/(.*)/excursions",
+      "scenario": "Live IoT Excursion Alarm Detail",
+      "responseStatus": 200,
+      "responseHeaders": {
+        "Content-Type": "application/json"
+      },
+      "responseBody": {
+        "poNumber": "PO-REQ-1001-SUP-B",
+        "sensorDeviceId": "IOT-TRUCK-9912",
+        "alertId": "EXC-ALARM-5501",
+        "alarmTimestamp": "2026-11-15T11:05:00Z",
+        "currentTempC": 9.4,
+        "criticalThresholdC": 8.0,
+        "consecutiveMinutesAboveThreshold": 45,
+        "coolingUnitFaultCode": "COMPRESSOR_CYCLE_DELAY",
+        "recommendedAction": "Immediate QA sensory evaluation or emergency transshipment"
+      }
+    }
+  ]
+}

@@ -1,0 +1,1453 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_ColdChainReplenishment"
+                  targetNamespace="http://bpmn.io/schema/bpmn"
+                  exporter="Camunda Modeler"
+                  exporterVersion="5.25.0">
+
+  <!-- Message Definitions -->
+  <bpmn:message id="Message_QuoteReceived" name="QuoteReceived">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="=requestId + &#34;-&#34; + supplier.supplierId" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+
+  <bpmn:message id="Message_ShipmentDelivered" name="ShipmentDelivered">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="=poResult.poNumber" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+
+  <bpmn:message id="Message_TempExcursionDetected" name="TempExcursionDetected">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="=poResult.poNumber" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+
+  <!-- Error Definitions -->
+  <bpmn:error id="Error_ShipmentRejected" name="Shipment Rejected" errorCode="SHIPMENT_REJECTED" />
+
+  <!-- Main Process -->
+  <bpmn:process id="coldChainReplenishment" name="Cold-Chain Replenishment Main Process" isExecutable="true">
+
+    <!-- 1. Start Event -->
+    <bpmn:startEvent id="StartEvent_ReplenishmentRequested" name="Replenishment Requested">
+      <bpmn:outgoing>Flow_StartToReview</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <!-- 2. User Task: Review & Approve Replenishment Request -->
+    <bpmn:userTask id="Task_ReviewRequest" name="Review &amp; Approve Replenishment Request">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="reviewReplenishmentRequest" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=requestId" target="requestId" />
+          <zeebe:input source="=storeId" target="storeId" />
+          <zeebe:input source="=storeManagerEmail" target="storeManagerEmail" />
+          <zeebe:input source="=maxTransitTempC" target="maxTransitTempC" />
+          <zeebe:input source="=budgetCap" target="budgetCap" />
+          <zeebe:input source="=items" target="items" />
+          <zeebe:input source="=suppliers" target="suppliers" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_StartToReview</bpmn:incoming>
+      <bpmn:outgoing>Flow_ReviewToGateway</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <!-- 3. Exclusive Gateway: Request Approved? -->
+    <bpmn:exclusiveGateway id="Gateway_RequestApproved" name="Request Approved?" default="Flow_RequestApproved">
+      <bpmn:incoming>Flow_ReviewToGateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_RequestApproved</bpmn:outgoing>
+      <bpmn:outgoing>Flow_RequestRejected</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <!-- Rejection End Event -->
+    <bpmn:endEvent id="EndEvent_RequestRejected" name="Request Rejected">
+      <bpmn:incoming>Flow_RequestRejected</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- 4. Parallel Multi-Instance Sub-Process: RFQ per Supplier -->
+    <bpmn:subProcess id="SubProcess_RFQPerSupplier" name="RFQ per Supplier">
+      <bpmn:incoming>Flow_RequestApproved</bpmn:incoming>
+      <bpmn:outgoing>Flow_RFQToQuoteGateway</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="false">
+        <bpmn:extensionElements>
+          <zeebe:loopCharacteristics inputCollection="=suppliers" inputElement="supplier" outputCollection="quotes" outputElement="=quote" />
+        </bpmn:extensionElements>
+      </bpmn:multiInstanceLoopCharacteristics>
+
+      <!-- Sub-Process Start -->
+      <bpmn:startEvent id="StartEvent_RFQInstance" name="RFQ Instance Started">
+        <bpmn:outgoing>Flow_RFQStartToSendEmail</bpmn:outgoing>
+      </bpmn:startEvent>
+
+      <!-- Email Connector: Send RFQ to Supplier -->
+      <bpmn:serviceTask id="Task_SendRFQEmail" name="Send RFQ to Supplier">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="io.camunda:email:1" />
+          <zeebe:ioMapping>
+            <zeebe:input source="{{secrets.SMTP_HOST}}" target="host" />
+            <zeebe:input source="{{secrets.SMTP_PORT}}" target="port" />
+            <zeebe:input source="{{secrets.SMTP_USER}}" target="user" />
+            <zeebe:input source="{{secrets.SMTP_PASSWORD}}" target="password" />
+            <zeebe:input source="procurement@coldchain-replenishment.example" target="from" />
+            <zeebe:input source="=supplier.email" target="to" />
+            <zeebe:input source="=&#34;RFQ for Store &#34; + storeId + &#34; - Request &#34; + requestId" target="subject" />
+            <zeebe:input source="=&#34;Dear &#34; + supplier.name + &#34;, please submit your quotation for Request &#34; + requestId + &#34;. Correlation key: &#34; + requestId + &#34;-&#34; + supplier.supplierId" target="body" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_RFQStartToSendEmail</bpmn:incoming>
+        <bpmn:outgoing>Flow_SendEmailToWaitSub</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <!-- Embedded Wait Sub-Process with Interrupting Boundary Timer -->
+      <bpmn:subProcess id="SubProcess_WaitForQuote" name="Wait for Supplier Quote">
+        <bpmn:incoming>Flow_SendEmailToWaitSub</bpmn:incoming>
+        <bpmn:outgoing>Flow_WaitSubToSetReceived</bpmn:outgoing>
+
+        <bpmn:startEvent id="StartEvent_WaitSub" name="Start Wait">
+          <bpmn:outgoing>Flow_WaitStartToCatch</bpmn:outgoing>
+        </bpmn:startEvent>
+
+        <bpmn:intermediateCatchEvent id="Event_QuoteReceived" name="Quote Received">
+          <bpmn:incoming>Flow_WaitStartToCatch</bpmn:incoming>
+          <bpmn:outgoing>Flow_CatchToWaitEnd</bpmn:outgoing>
+          <bpmn:messageEventDefinition id="MsgEventDef_QuoteReceived" messageRef="Message_QuoteReceived" />
+        </bpmn:intermediateCatchEvent>
+
+        <bpmn:endEvent id="EndEvent_WaitSub" name="Quote Caught">
+          <bpmn:incoming>Flow_CatchToWaitEnd</bpmn:incoming>
+        </bpmn:endEvent>
+
+        <bpmn:sequenceFlow id="Flow_WaitStartToCatch" sourceRef="StartEvent_WaitSub" targetRef="Event_QuoteReceived" />
+        <bpmn:sequenceFlow id="Flow_CatchToWaitEnd" sourceRef="Event_QuoteReceived" targetRef="EndEvent_WaitSub" />
+      </bpmn:subProcess>
+
+      <!-- Interrupting Boundary Timer Event (Demo: PT2M, Production: PT4H) -->
+      <bpmn:boundaryEvent id="BoundaryEvent_QuoteTimeout" name="Quote Timeout (PT2M)" attachedToRef="SubProcess_WaitForQuote" cancelActivity="true">
+        <bpmn:outgoing>Flow_TimeoutToSetTimedOut</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="TimerDef_QuoteTimeout">
+          <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT2M</bpmn:timeDuration>
+        </bpmn:timerEventDefinition>
+      </bpmn:boundaryEvent>
+
+      <!-- Script Task: Set Received Quote -->
+      <bpmn:scriptTask id="Task_SetReceivedQuote" name="Record Received Quote">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={ supplierId: supplier.supplierId, price: quotePrice, responded: true }" resultVariable="quote" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_WaitSubToSetReceived</bpmn:incoming>
+        <bpmn:outgoing>Flow_SetReceivedToJoin</bpmn:outgoing>
+      </bpmn:scriptTask>
+
+      <!-- Script Task: Set Timed-Out Quote -->
+      <bpmn:scriptTask id="Task_SetTimedOutQuote" name="Record Timed-Out Quote">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={ supplierId: supplier.supplierId, price: null, responded: false }" resultVariable="quote" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_TimeoutToSetTimedOut</bpmn:incoming>
+        <bpmn:outgoing>Flow_SetTimedOutToJoin</bpmn:outgoing>
+      </bpmn:scriptTask>
+
+      <!-- Exclusive Gateway Join for Quote Outcomes -->
+      <bpmn:exclusiveGateway id="Gateway_JoinQuoteOutcome" name="Join Quote Outcome" default="Flow_QuoteJoinToEnd">
+        <bpmn:incoming>Flow_SetReceivedToJoin</bpmn:incoming>
+        <bpmn:incoming>Flow_SetTimedOutToJoin</bpmn:incoming>
+        <bpmn:outgoing>Flow_QuoteJoinToEnd</bpmn:outgoing>
+      </bpmn:exclusiveGateway>
+
+      <bpmn:endEvent id="EndEvent_RFQInstance" name="RFQ Instance Completed">
+        <bpmn:incoming>Flow_QuoteJoinToEnd</bpmn:incoming>
+      </bpmn:endEvent>
+
+      <!-- Sub-Process Sequence Flows -->
+      <bpmn:sequenceFlow id="Flow_RFQStartToSendEmail" sourceRef="StartEvent_RFQInstance" targetRef="Task_SendRFQEmail" />
+      <bpmn:sequenceFlow id="Flow_SendEmailToWaitSub" sourceRef="Task_SendRFQEmail" targetRef="SubProcess_WaitForQuote" />
+      <bpmn:sequenceFlow id="Flow_WaitSubToSetReceived" sourceRef="SubProcess_WaitForQuote" targetRef="Task_SetReceivedQuote" />
+      <bpmn:sequenceFlow id="Flow_TimeoutToSetTimedOut" sourceRef="BoundaryEvent_QuoteTimeout" targetRef="Task_SetTimedOutQuote" />
+      <bpmn:sequenceFlow id="Flow_SetReceivedToJoin" sourceRef="Task_SetReceivedQuote" targetRef="Gateway_JoinQuoteOutcome" />
+      <bpmn:sequenceFlow id="Flow_SetTimedOutToJoin" sourceRef="Task_SetTimedOutQuote" targetRef="Gateway_JoinQuoteOutcome" />
+      <bpmn:sequenceFlow id="Flow_QuoteJoinToEnd" sourceRef="Gateway_JoinQuoteOutcome" targetRef="EndEvent_RFQInstance" />
+    </bpmn:subProcess>
+
+    <!-- 5. Exclusive Gateway: Any Valid Quotes? -->
+    <bpmn:exclusiveGateway id="Gateway_AnyValidQuote" name="Any Valid Quotes?" default="Flow_NoQuotesAlert">
+      <bpmn:incoming>Flow_RFQToQuoteGateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_ValidQuotesPresent</bpmn:outgoing>
+      <bpmn:outgoing>Flow_NoQuotesAlert</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <!-- Slack Connector: Alert QA / Procurement of No Quotes -->
+    <bpmn:serviceTask id="Task_AlertNoQuotes" name="Alert QA: No Quotes Received">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="io.camunda:slack:1" />
+        <zeebe:ioMapping>
+          <zeebe:input source="{{secrets.SLACK_BOT_TOKEN}}" target="token" />
+          <zeebe:input source="chat.postMessage" target="method" />
+          <zeebe:input source="={ channel: &#34;{{secrets.SLACK_QA_CHANNEL}}&#34;, text: &#34;URGENT: No supplier quotes received for replenishment request &#34; + requestId + &#34; at store &#34; + storeId + &#34;. Escalating to Category Manager.&#34; }" target="data" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_NoQuotesAlert</bpmn:incoming>
+      <bpmn:outgoing>Flow_AlertToNoQuotesEnd</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_NoQuotesEscalated" name="No Quotes – Escalated">
+      <bpmn:incoming>Flow_AlertToNoQuotesEnd</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- 6. Script Task: Rank & Select Suppliers -->
+    <bpmn:scriptTask id="Task_RankSelectSuppliers" name="Rank &amp; Select Suppliers">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=(for q in sort(quotes[item.responded = true], function(x, y) x.price &lt; y.price) return { supplierId: q.supplierId, poNumber: &#34;PO-&#34; + requestId + &#34;-&#34; + q.supplierId, items: items, amount: q.price })[item.amount &lt;= budgetCap]" resultVariable="selectedOrders" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ValidQuotesPresent</bpmn:incoming>
+      <bpmn:outgoing>Flow_RankToIssuePOs</bpmn:outgoing>
+    </bpmn:scriptTask>
+
+    <!-- 7. Sequential Multi-Instance: Issue Purchase Orders -->
+    <bpmn:subProcess id="SubProcess_IssuePurchaseOrders" name="Issue Purchase Orders">
+      <bpmn:incoming>Flow_RankToIssuePOs</bpmn:incoming>
+      <bpmn:outgoing>Flow_IssuePOsToFulfilment</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true">
+        <bpmn:extensionElements>
+          <zeebe:loopCharacteristics inputCollection="=selectedOrders" inputElement="order" outputCollection="poResults" outputElement="=poResult" />
+        </bpmn:extensionElements>
+      </bpmn:multiInstanceLoopCharacteristics>
+
+      <bpmn:startEvent id="StartEvent_IssuePOInstance" name="PO Dispatch Started">
+        <bpmn:outgoing>Flow_IssuePOStartToPost</bpmn:outgoing>
+      </bpmn:startEvent>
+
+      <!-- REST Connector: POST PO to Supplier API -->
+      <bpmn:serviceTask id="Task_PostPOToSupplierAPI" name="POST PO to Supplier API">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="http" />
+          <zeebe:ioMapping>
+            <zeebe:input source="post" target="method" />
+            <zeebe:input source="{{secrets.SUPPLIER_API_BASE_URL}}/orders" target="url" />
+            <zeebe:input source="={ &#34;Content-Type&#34;: &#34;application/json&#34;, &#34;Authorization&#34;: &#34;Bearer {{secrets.SUPPLIER_API_TOKEN}}&#34; }" target="headers" />
+            <zeebe:input source="=order" target="body" />
+          </zeebe:ioMapping>
+          <zeebe:taskHeaders>
+            <zeebe:header key="resultVariable" value="supplierOrderResponse" />
+          </zeebe:taskHeaders>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_IssuePOStartToPost</bpmn:incoming>
+        <bpmn:outgoing>Flow_PostPOToSendEmail</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <!-- Email Connector: Send PO Confirmation Email -->
+      <bpmn:serviceTask id="Task_SendPOConfirmationEmail" name="Send PO Confirmation Email">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="io.camunda:email:1" />
+          <zeebe:ioMapping>
+            <zeebe:input source="{{secrets.SMTP_HOST}}" target="host" />
+            <zeebe:input source="{{secrets.SMTP_PORT}}" target="port" />
+            <zeebe:input source="{{secrets.SMTP_USER}}" target="user" />
+            <zeebe:input source="{{secrets.SMTP_PASSWORD}}" target="password" />
+            <zeebe:input source="procurement@coldchain-replenishment.example" target="from" />
+            <zeebe:input source="=&#34;supplier-&#34; + order.supplierId + &#34;@supplier.example&#34;" target="to" />
+            <zeebe:input source="=&#34;Purchase Order Dispatched: &#34; + order.poNumber" target="subject" />
+            <zeebe:input source="=&#34;Purchase Order &#34; + order.poNumber + &#34; has been confirmed for total amount &#34; + string(order.amount) + &#34;.&#34;" target="body" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_PostPOToSendEmail</bpmn:incoming>
+        <bpmn:outgoing>Flow_SendEmailToSetResult</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <!-- Script Task: Assemble PO Result Object -->
+      <bpmn:scriptTask id="Task_SetPOResult" name="Set PO Result Object">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={ poNumber: order.poNumber, supplierId: order.supplierId, items: order.items, amount: order.amount, poStatus: &#34;DISPATCHED&#34; }" resultVariable="poResult" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_SendEmailToSetResult</bpmn:incoming>
+        <bpmn:outgoing>Flow_SetResultToPOEnd</bpmn:outgoing>
+      </bpmn:scriptTask>
+
+      <bpmn:endEvent id="EndEvent_IssuePOInstance" name="PO Dispatched">
+        <bpmn:incoming>Flow_SetResultToPOEnd</bpmn:incoming>
+      </bpmn:endEvent>
+
+      <bpmn:sequenceFlow id="Flow_IssuePOStartToPost" sourceRef="StartEvent_IssuePOInstance" targetRef="Task_PostPOToSupplierAPI" />
+      <bpmn:sequenceFlow id="Flow_PostPOToSendEmail" sourceRef="Task_PostPOToSupplierAPI" targetRef="Task_SendPOConfirmationEmail" />
+      <bpmn:sequenceFlow id="Flow_SendEmailToSetResult" sourceRef="Task_SendPOConfirmationEmail" targetRef="Task_SetPOResult" />
+      <bpmn:sequenceFlow id="Flow_SetResultToPOEnd" sourceRef="Task_SetPOResult" targetRef="EndEvent_IssuePOInstance" />
+    </bpmn:subProcess>
+
+    <!-- 8. Parallel Multi-Instance Sub-Process: Shipment Fulfilment per PO -->
+    <bpmn:subProcess id="SubProcess_ShipmentFulfilment" name="Shipment Fulfilment per PO">
+      <bpmn:incoming>Flow_IssuePOsToFulfilment</bpmn:incoming>
+      <bpmn:outgoing>Flow_FulfilmentToSummaryGateway</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="false">
+        <bpmn:extensionElements>
+          <zeebe:loopCharacteristics inputCollection="=poResults" inputElement="poResult" outputCollection="shipmentResults" outputElement="=shipmentResult" />
+        </bpmn:extensionElements>
+      </bpmn:multiInstanceLoopCharacteristics>
+
+      <bpmn:startEvent id="StartEvent_ShipmentInstance" name="Start Shipment Fulfilment">
+        <bpmn:outgoing>Flow_ShipmentStartToTransit</bpmn:outgoing>
+      </bpmn:startEvent>
+
+      <!-- Nested Embedded Sub-Process: Cold-Chain Transit -->
+      <bpmn:subProcess id="SubProcess_ColdChainTransit" name="Cold-Chain Transit">
+        <bpmn:incoming>Flow_ShipmentStartToTransit</bpmn:incoming>
+        <bpmn:outgoing>Flow_TransitToGoodsReceipt</bpmn:outgoing>
+
+        <bpmn:startEvent id="StartEvent_TransitActive" name="Transit In Progress">
+          <bpmn:outgoing>Flow_TransitStartToCatchDelivered</bpmn:outgoing>
+        </bpmn:startEvent>
+
+        <!-- Message Intermediate Catch: Delivered -->
+        <bpmn:intermediateCatchEvent id="Event_ShipmentDelivered" name="Shipment Delivered">
+          <bpmn:incoming>Flow_TransitStartToCatchDelivered</bpmn:incoming>
+          <bpmn:outgoing>Flow_DeliveredToFetchTelemetry</bpmn:outgoing>
+          <bpmn:messageEventDefinition id="MsgEventDef_ShipmentDelivered" messageRef="Message_ShipmentDelivered" />
+        </bpmn:intermediateCatchEvent>
+
+        <!-- REST Connector: GET Final Telemetry from Mock IoT API -->
+        <bpmn:serviceTask id="Task_FetchFinalTelemetry" name="GET Final IoT Telemetry">
+          <bpmn:extensionElements>
+            <zeebe:taskDefinition type="http" />
+            <zeebe:ioMapping>
+              <zeebe:input source="get" target="method" />
+              <zeebe:input source="=&#34;{{secrets.IOT_API_BASE_URL}}/telemetry/&#34; + poResult.poNumber" target="url" />
+              <zeebe:input source="={ &#34;Authorization&#34;: &#34;Bearer {{secrets.IOT_API_TOKEN}}&#34; }" target="headers" />
+            </zeebe:ioMapping>
+            <zeebe:taskHeaders>
+              <zeebe:header key="resultVariable" value="telemetryData" />
+            </zeebe:taskHeaders>
+          </bpmn:extensionElements>
+          <bpmn:incoming>Flow_DeliveredToFetchTelemetry</bpmn:incoming>
+          <bpmn:outgoing>Flow_FetchToTempCheckGateway</bpmn:outgoing>
+        </bpmn:serviceTask>
+
+        <!-- Exclusive Gateway: Max Temp Exceeded? -->
+        <bpmn:exclusiveGateway id="Gateway_CheckTempExceeded" name="Max Temp Exceeded?" default="Flow_TempNormal">
+          <bpmn:incoming>Flow_FetchToTempCheckGateway</bpmn:incoming>
+          <bpmn:outgoing>Flow_TempNormal</bpmn:outgoing>
+          <bpmn:outgoing>Flow_TempExceeded</bpmn:outgoing>
+        </bpmn:exclusiveGateway>
+
+        <!-- User Task: QA Inspection -->
+        <bpmn:userTask id="Task_QAInspection" name="QA Inspection">
+          <bpmn:extensionElements>
+            <zeebe:formDefinition formId="qaInspection" />
+            <zeebe:ioMapping>
+              <zeebe:input source="=poResult.poNumber" target="poNumber" />
+              <zeebe:input source="=telemetryData.maxTempC" target="maxTempC" />
+              <zeebe:input source="=maxTransitTempC" target="maxTransitTempC" />
+              <zeebe:input source="=telemetryData" target="telemetryData" />
+            </zeebe:ioMapping>
+          </bpmn:extensionElements>
+          <bpmn:incoming>Flow_TempExceeded</bpmn:incoming>
+          <bpmn:outgoing>Flow_QAInspectionToGateway</bpmn:outgoing>
+        </bpmn:userTask>
+
+        <!-- Exclusive Gateway: QA Inspection Decision -->
+        <bpmn:exclusiveGateway id="Gateway_QAInspectionPassed" name="QA Inspection Decision?" default="Flow_QAInspectionReject">
+          <bpmn:incoming>Flow_QAInspectionToGateway</bpmn:incoming>
+          <bpmn:outgoing>Flow_QAInspectionPassed</bpmn:outgoing>
+          <bpmn:outgoing>Flow_QAInspectionReject</bpmn:outgoing>
+        </bpmn:exclusiveGateway>
+
+        <!-- Error End Event: QA Rejects Shipment -->
+        <bpmn:endEvent id="EndEvent_TransitQARejected" name="Shipment Rejected by QA">
+          <bpmn:incoming>Flow_QAInspectionReject</bpmn:incoming>
+          <bpmn:errorEventDefinition id="ErrorDef_TransitQARejected" errorRef="Error_ShipmentRejected" />
+        </bpmn:endEvent>
+
+        <!-- Exclusive Gateway Join for Transit Temp Inspection -->
+        <bpmn:exclusiveGateway id="Gateway_TransitTempJoin" name="Join Transit Flow" default="Flow_TempJoinToEnd">
+          <bpmn:incoming>Flow_TempNormal</bpmn:incoming>
+          <bpmn:incoming>Flow_QAInspectionPassed</bpmn:incoming>
+          <bpmn:outgoing>Flow_TempJoinToEnd</bpmn:outgoing>
+        </bpmn:exclusiveGateway>
+
+        <bpmn:endEvent id="EndEvent_TransitCompleted" name="Transit Completed">
+          <bpmn:incoming>Flow_TempJoinToEnd</bpmn:incoming>
+        </bpmn:endEvent>
+
+        <!-- Event Sub-Process: IoT Temperature Excursion Handling (Non-interrupting) -->
+        <bpmn:subProcess id="EventSubProcess_TempExcursion" name="IoT Temperature Excursion Handling" triggeredByEvent="true">
+          <bpmn:startEvent id="StartEvent_TempExcursion" name="Temp Excursion Detected (&gt; 8°C)" isInterrupting="false">
+            <bpmn:outgoing>Flow_ExcursionStartToFetch</bpmn:outgoing>
+            <bpmn:messageEventDefinition id="MsgEventDef_TempExcursion" messageRef="Message_TempExcursionDetected" />
+          </bpmn:startEvent>
+
+          <!-- REST Connector: Fetch Real-time Excursion Details -->
+          <bpmn:serviceTask id="Task_FetchExcursionTelemetry" name="Fetch Excursion Details">
+            <bpmn:extensionElements>
+              <zeebe:taskDefinition type="http" />
+              <zeebe:ioMapping>
+                <zeebe:input source="get" target="method" />
+                <zeebe:input source="=&#34;{{secrets.IOT_API_BASE_URL}}/telemetry/&#34; + poResult.poNumber + &#34;/excursions&#34;" target="url" />
+                <zeebe:input source="={ &#34;Authorization&#34;: &#34;Bearer {{secrets.IOT_API_TOKEN}}&#34; }" target="headers" />
+              </zeebe:ioMapping>
+              <zeebe:taskHeaders>
+                <zeebe:header key="resultVariable" value="excursionDetail" />
+              </zeebe:taskHeaders>
+            </bpmn:extensionElements>
+            <bpmn:incoming>Flow_ExcursionStartToFetch</bpmn:incoming>
+            <bpmn:outgoing>Flow_FetchToSlackAlert</bpmn:outgoing>
+          </bpmn:serviceTask>
+
+          <!-- Slack Connector: Alert QA Team -->
+          <bpmn:serviceTask id="Task_AlertQAExcursion" name="Alert QA: Excursion Detected">
+            <bpmn:extensionElements>
+              <zeebe:taskDefinition type="io.camunda:slack:1" />
+              <zeebe:ioMapping>
+                <zeebe:input source="{{secrets.SLACK_BOT_TOKEN}}" target="token" />
+                <zeebe:input source="chat.postMessage" target="method" />
+                <zeebe:input source="={ channel: &#34;{{secrets.SLACK_QA_CHANNEL}}&#34;, text: &#34;WARNING: IoT Temperature excursion (&gt; &#34; + string(maxTransitTempC) + &#34;°C) detected for PO &#34; + poResult.poNumber + &#34;. Immediate QA triage required.&#34; }" target="data" />
+              </zeebe:ioMapping>
+            </bpmn:extensionElements>
+            <bpmn:incoming>Flow_FetchToSlackAlert</bpmn:incoming>
+            <bpmn:outgoing>Flow_SlackToQADecision</bpmn:outgoing>
+          </bpmn:serviceTask>
+
+          <!-- User Task: QA Decision -->
+          <bpmn:userTask id="Task_QADecision" name="QA Excursion Decision">
+            <bpmn:extensionElements>
+              <zeebe:formDefinition formId="qaDecision" />
+              <zeebe:ioMapping>
+                <zeebe:input source="=poResult.poNumber" target="poNumber" />
+                <zeebe:input source="=excursionDetail" target="excursionDetail" />
+                <zeebe:input source="=maxTransitTempC" target="maxTransitTempC" />
+              </zeebe:ioMapping>
+            </bpmn:extensionElements>
+            <bpmn:incoming>Flow_SlackToQADecision</bpmn:incoming>
+            <bpmn:outgoing>Flow_QADecisionToGateway</bpmn:outgoing>
+          </bpmn:userTask>
+
+          <!-- Exclusive Gateway: Excursion Action -->
+          <bpmn:exclusiveGateway id="Gateway_ExcursionDecision" name="QA Excursion Action?" default="Flow_ExcursionAccept">
+            <bpmn:incoming>Flow_QADecisionToGateway</bpmn:incoming>
+            <bpmn:outgoing>Flow_ExcursionAccept</bpmn:outgoing>
+            <bpmn:outgoing>Flow_ExcursionReject</bpmn:outgoing>
+          </bpmn:exclusiveGateway>
+
+          <!-- Error End Event: Triggers Boundary Error Event on ColdChainTransit -->
+          <bpmn:endEvent id="EndEvent_ExcursionRejected" name="Excursion Rejected">
+            <bpmn:incoming>Flow_ExcursionReject</bpmn:incoming>
+            <bpmn:errorEventDefinition id="ErrorDef_ExcursionRejected" errorRef="Error_ShipmentRejected" />
+          </bpmn:endEvent>
+
+          <bpmn:endEvent id="EndEvent_ExcursionAccepted" name="Excursion Cleared">
+            <bpmn:incoming>Flow_ExcursionAccept</bpmn:incoming>
+          </bpmn:endEvent>
+
+          <bpmn:sequenceFlow id="Flow_ExcursionStartToFetch" sourceRef="StartEvent_TempExcursion" targetRef="Task_FetchExcursionTelemetry" />
+          <bpmn:sequenceFlow id="Flow_FetchToSlackAlert" sourceRef="Task_FetchExcursionTelemetry" targetRef="Task_AlertQAExcursion" />
+          <bpmn:sequenceFlow id="Flow_SlackToQADecision" sourceRef="Task_AlertQAExcursion" targetRef="Task_QADecision" />
+          <bpmn:sequenceFlow id="Flow_QADecisionToGateway" sourceRef="Task_QADecision" targetRef="Gateway_ExcursionDecision" />
+          <bpmn:sequenceFlow id="Flow_ExcursionAccept" name="Accept Deviation" sourceRef="Gateway_ExcursionDecision" targetRef="EndEvent_ExcursionAccepted" />
+          <bpmn:sequenceFlow id="Flow_ExcursionReject" name="Reject Shipment" sourceRef="Gateway_ExcursionDecision" targetRef="EndEvent_ExcursionRejected">
+            <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=qaExcursionDecision = "REJECT"</bpmn:conditionExpression>
+          </bpmn:sequenceFlow>
+        </bpmn:subProcess>
+
+        <!-- Transit Sub-Process Flows -->
+        <bpmn:sequenceFlow id="Flow_TransitStartToCatchDelivered" sourceRef="StartEvent_TransitActive" targetRef="Event_ShipmentDelivered" />
+        <bpmn:sequenceFlow id="Flow_DeliveredToFetchTelemetry" sourceRef="Event_ShipmentDelivered" targetRef="Task_FetchFinalTelemetry" />
+        <bpmn:sequenceFlow id="Flow_FetchToTempCheckGateway" sourceRef="Task_FetchFinalTelemetry" targetRef="Gateway_CheckTempExceeded" />
+        <bpmn:sequenceFlow id="Flow_TempNormal" name="Within Cold Range" sourceRef="Gateway_CheckTempExceeded" targetRef="Gateway_TransitTempJoin" />
+        <bpmn:sequenceFlow id="Flow_TempExceeded" name="Temp &gt; 8°C Exceeded" sourceRef="Gateway_CheckTempExceeded" targetRef="Task_QAInspection">
+          <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=telemetryData.maxTempC &gt; maxTransitTempC</bpmn:conditionExpression>
+        </bpmn:sequenceFlow>
+        <bpmn:sequenceFlow id="Flow_QAInspectionToGateway" sourceRef="Task_QAInspection" targetRef="Gateway_QAInspectionPassed" />
+        <bpmn:sequenceFlow id="Flow_QAInspectionPassed" name="QA Approved" sourceRef="Gateway_QAInspectionPassed" targetRef="Gateway_TransitTempJoin">
+          <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=qaInspectionPassed = true</bpmn:conditionExpression>
+        </bpmn:sequenceFlow>
+        <bpmn:sequenceFlow id="Flow_QAInspectionReject" name="QA Condemned" sourceRef="Gateway_QAInspectionPassed" targetRef="EndEvent_TransitQARejected" />
+        <bpmn:sequenceFlow id="Flow_TempJoinToEnd" sourceRef="Gateway_TransitTempJoin" targetRef="EndEvent_TransitCompleted" />
+
+      </bpmn:subProcess>
+
+      <!-- Boundary Timer Event on ColdChainTransit: Delivery SLA Breach (Demo: PT5M, Production: P2D) -->
+      <bpmn:boundaryEvent id="BoundaryEvent_DeliveryTimer" name="Delivery SLA (PT5M)" attachedToRef="SubProcess_ColdChainTransit" cancelActivity="true">
+        <bpmn:outgoing>Flow_LateTimerToSlack</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="TimerDef_DeliverySLA">
+          <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT5M</bpmn:timeDuration>
+        </bpmn:timerEventDefinition>
+      </bpmn:boundaryEvent>
+
+      <!-- Slack Connector: Alert QA of Late Delivery -->
+      <bpmn:serviceTask id="Task_SlackLateDelivery" name="Alert QA: Delivery Overdue">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="io.camunda:slack:1" />
+          <zeebe:ioMapping>
+            <zeebe:input source="{{secrets.SLACK_BOT_TOKEN}}" target="token" />
+            <zeebe:input source="chat.postMessage" target="method" />
+            <zeebe:input source="={ channel: &#34;{{secrets.SLACK_QA_CHANNEL}}&#34;, text: &#34;SLA BREACH: Shipment delivery for PO &#34; + poResult.poNumber + &#34; is overdue.&#34; }" target="data" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_LateTimerToSlack</bpmn:incoming>
+        <bpmn:outgoing>Flow_SlackToEmailLateSupplier</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <!-- Email Connector: Notify Supplier of Overdue Delivery -->
+      <bpmn:serviceTask id="Task_EmailSupplierLate" name="Email Supplier: Overdue Notice">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="io.camunda:email:1" />
+          <zeebe:ioMapping>
+            <zeebe:input source="{{secrets.SMTP_HOST}}" target="host" />
+            <zeebe:input source="{{secrets.SMTP_PORT}}" target="port" />
+            <zeebe:input source="{{secrets.SMTP_USER}}" target="user" />
+            <zeebe:input source="{{secrets.SMTP_PASSWORD}}" target="password" />
+            <zeebe:input source="procurement@coldchain-replenishment.example" target="from" />
+            <zeebe:input source="=&#34;supplier-&#34; + poResult.supplierId + &#34;@supplier.example&#34;" target="to" />
+            <zeebe:input source="=&#34;URGENT: Delivery SLA Breach for PO &#34; + poResult.poNumber" target="subject" />
+            <zeebe:input source="=&#34;Your shipment for PO &#34; + poResult.poNumber + &#34; has exceeded the cold-chain transit SLA. Immediate status update required.&#34;" target="body" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_SlackToEmailLateSupplier</bpmn:incoming>
+        <bpmn:outgoing>Flow_EmailLateToSetResult</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <bpmn:scriptTask id="Task_SetShipmentLateResult" name="Set Shipment Late Result">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={ poNumber: poResult.poNumber, supplierId: poResult.supplierId, status: &#34;LATE&#34;, matchStatus: &#34;NOT_APPLICABLE&#34; }" resultVariable="shipmentResult" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_EmailLateToSetResult</bpmn:incoming>
+        <bpmn:outgoing>Flow_LateResultToEnd</bpmn:outgoing>
+      </bpmn:scriptTask>
+
+      <bpmn:endEvent id="EndEvent_DeliveryLate" name="Delivery Late">
+        <bpmn:incoming>Flow_LateResultToEnd</bpmn:incoming>
+      </bpmn:endEvent>
+
+      <!-- Boundary Error Event on ColdChainTransit: Shipment Rejected -->
+      <bpmn:boundaryEvent id="BoundaryEvent_ShipmentRejected" name="Shipment Rejected Error" attachedToRef="SubProcess_ColdChainTransit">
+        <bpmn:outgoing>Flow_RejectedToSlack</bpmn:outgoing>
+        <bpmn:errorEventDefinition id="ErrorDef_BoundaryShipmentRejected" errorRef="Error_ShipmentRejected" />
+      </bpmn:boundaryEvent>
+
+      <!-- Slack Connector: Alert QA of Rejection -->
+      <bpmn:serviceTask id="Task_SlackShipmentRejected" name="Alert QA: Shipment Rejected">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="io.camunda:slack:1" />
+          <zeebe:ioMapping>
+            <zeebe:input source="{{secrets.SLACK_BOT_TOKEN}}" target="token" />
+            <zeebe:input source="chat.postMessage" target="method" />
+            <zeebe:input source="={ channel: &#34;{{secrets.SLACK_QA_CHANNEL}}&#34;, text: &#34;CRITICAL: Cold-chain shipment rejected for PO &#34; + poResult.poNumber + &#34; due to quality/temperature violation. Supplier dispute opened.&#34; }" target="data" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_RejectedToSlack</bpmn:incoming>
+        <bpmn:outgoing>Flow_SlackToRestRejectPO</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <!-- REST Connector: Mark PO Rejected in Supplier API -->
+      <bpmn:serviceTask id="Task_RestMarkPORejected" name="Mark PO Rejected in Supplier API">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="http" />
+          <zeebe:ioMapping>
+            <zeebe:input source="post" target="method" />
+            <zeebe:input source="=&#34;{{secrets.SUPPLIER_API_BASE_URL}}/orders/&#34; + poResult.poNumber + &#34;/reject&#34;" target="url" />
+            <zeebe:input source="={ &#34;Content-Type&#34;: &#34;application/json&#34;, &#34;Authorization&#34;: &#34;Bearer {{secrets.SUPPLIER_API_TOKEN}}&#34; }" target="headers" />
+            <zeebe:input source="={ &#34;poNumber&#34;: poResult.poNumber, &#34;status&#34;: &#34;REJECTED&#34;, &#34;reason&#34;: &#34;Cold-chain temperature excursion breach&#34; }" target="body" />
+          </zeebe:ioMapping>
+          <zeebe:taskHeaders>
+            <zeebe:header key="resultVariable" value="rejectApiResponse" />
+          </zeebe:taskHeaders>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_SlackToRestRejectPO</bpmn:incoming>
+        <bpmn:outgoing>Flow_RestRejectToSetResult</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <bpmn:scriptTask id="Task_SetShipmentRejectedResult" name="Set Shipment Rejected Result">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={ poNumber: poResult.poNumber, supplierId: poResult.supplierId, status: &#34;REJECTED&#34;, matchStatus: &#34;DISPUTED&#34; }" resultVariable="shipmentResult" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_RestRejectToSetResult</bpmn:incoming>
+        <bpmn:outgoing>Flow_RejectedResultToEnd</bpmn:outgoing>
+      </bpmn:scriptTask>
+
+      <bpmn:endEvent id="EndEvent_ShipmentRejected" name="Shipment Rejected">
+        <bpmn:incoming>Flow_RejectedResultToEnd</bpmn:incoming>
+      </bpmn:endEvent>
+
+      <!-- User Task: Confirm Goods Receipt (After Transit) -->
+      <bpmn:userTask id="Task_ConfirmGoodsReceipt" name="Confirm Goods Receipt">
+        <bpmn:extensionElements>
+          <zeebe:formDefinition formId="confirmGoodsReceipt" />
+          <zeebe:ioMapping>
+            <zeebe:input source="=poResult.poNumber" target="poNumber" />
+            <zeebe:input source="=poResult.items" target="items" />
+            <zeebe:input source="=poResult.amount" target="orderedAmount" />
+            <zeebe:input source="=sum(poResult.items.qty)" target="orderedQty" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_TransitToGoodsReceipt</bpmn:incoming>
+        <bpmn:outgoing>Flow_GoodsReceiptToCallActivity</bpmn:outgoing>
+      </bpmn:userTask>
+
+      <!-- Call Activity: Supplier Invoice Three-Way Match -->
+      <bpmn:callActivity id="CallActivity_ThreeWayMatch" name="Supplier Invoice Three-Way Match">
+        <bpmn:extensionElements>
+          <zeebe:calledElement processId="supplierInvoiceThreeWayMatch" propagateAllChildVariables="false" bindingType="latest" />
+          <zeebe:ioMapping>
+            <zeebe:input source="=poResult.poNumber" target="poNumber" />
+            <zeebe:input source="=sum(poResult.items.qty)" target="orderedQty" />
+            <zeebe:input source="=poResult.amount" target="orderedAmount" />
+            <zeebe:input source="=receivedQty" target="receivedQty" />
+            <zeebe:input source="=invoiceAmount" target="invoiceAmount" />
+            <zeebe:input source="=invoiceNumber" target="invoiceNumber" />
+            <zeebe:output source="=matchStatus" target="childMatchStatus" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_GoodsReceiptToCallActivity</bpmn:incoming>
+        <bpmn:outgoing>Flow_CallActivityToAssembleResult</bpmn:outgoing>
+      </bpmn:callActivity>
+
+      <!-- Script Task: Assemble Shipment Result -->
+      <bpmn:scriptTask id="Task_AssembleShipmentResult" name="Assemble Shipment Result">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={ poNumber: poResult.poNumber, supplierId: poResult.supplierId, status: &#34;COMPLETED&#34;, matchStatus: childMatchStatus }" resultVariable="shipmentResult" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_CallActivityToAssembleResult</bpmn:incoming>
+        <bpmn:outgoing>Flow_AssembleResultToEnd</bpmn:outgoing>
+      </bpmn:scriptTask>
+
+      <bpmn:endEvent id="EndEvent_ShipmentInstanceEnd" name="Shipment Fulfilled">
+        <bpmn:incoming>Flow_AssembleResultToEnd</bpmn:incoming>
+      </bpmn:endEvent>
+
+      <!-- Main Instance Flows -->
+      <bpmn:sequenceFlow id="Flow_ShipmentStartToTransit" sourceRef="StartEvent_ShipmentInstance" targetRef="SubProcess_ColdChainTransit" />
+      <bpmn:sequenceFlow id="Flow_TransitToGoodsReceipt" sourceRef="SubProcess_ColdChainTransit" targetRef="Task_ConfirmGoodsReceipt" />
+      <bpmn:sequenceFlow id="Flow_GoodsReceiptToCallActivity" sourceRef="Task_ConfirmGoodsReceipt" targetRef="CallActivity_ThreeWayMatch" />
+      <bpmn:sequenceFlow id="Flow_CallActivityToAssembleResult" sourceRef="CallActivity_ThreeWayMatch" targetRef="Task_AssembleShipmentResult" />
+      <bpmn:sequenceFlow id="Flow_AssembleResultToEnd" sourceRef="Task_AssembleShipmentResult" targetRef="EndEvent_ShipmentInstanceEnd" />
+
+      <!-- Boundary Event Flows -->
+      <bpmn:sequenceFlow id="Flow_LateTimerToSlack" sourceRef="BoundaryEvent_DeliveryTimer" targetRef="Task_SlackLateDelivery" />
+      <bpmn:sequenceFlow id="Flow_SlackToEmailLateSupplier" sourceRef="Task_SlackLateDelivery" targetRef="Task_EmailSupplierLate" />
+      <bpmn:sequenceFlow id="Flow_EmailLateToSetResult" sourceRef="Task_EmailSupplierLate" targetRef="Task_SetShipmentLateResult" />
+      <bpmn:sequenceFlow id="Flow_LateResultToEnd" sourceRef="Task_SetShipmentLateResult" targetRef="EndEvent_DeliveryLate" />
+
+      <bpmn:sequenceFlow id="Flow_RejectedToSlack" sourceRef="BoundaryEvent_ShipmentRejected" targetRef="Task_SlackShipmentRejected" />
+      <bpmn:sequenceFlow id="Flow_SlackToRestRejectPO" sourceRef="Task_SlackShipmentRejected" targetRef="Task_RestMarkPORejected" />
+      <bpmn:sequenceFlow id="Flow_RestRejectToSetResult" sourceRef="Task_RestMarkPORejected" targetRef="Task_SetShipmentRejectedResult" />
+      <bpmn:sequenceFlow id="Flow_RejectedResultToEnd" sourceRef="Task_SetShipmentRejectedResult" targetRef="EndEvent_ShipmentRejected" />
+
+    </bpmn:subProcess>
+
+    <!-- 9. Exclusive Gateway: Evaluate Shipment Fulfilment Results -->
+    <bpmn:exclusiveGateway id="Gateway_ShipmentResultsSummary" name="All Shipments OK?" default="Flow_AllShipmentsOK">
+      <bpmn:incoming>Flow_FulfilmentToSummaryGateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_AllShipmentsOK</bpmn:outgoing>
+      <bpmn:outgoing>Flow_ShipmentsDiscrepancy</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <!-- Email Connector: Summary Email (All OK) -->
+    <bpmn:serviceTask id="Task_SendSummaryEmailOK" name="Send Fulfilment Summary Email">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="io.camunda:email:1" />
+        <zeebe:ioMapping>
+          <zeebe:input source="{{secrets.SMTP_HOST}}" target="host" />
+          <zeebe:input source="{{secrets.SMTP_PORT}}" target="port" />
+          <zeebe:input source="{{secrets.SMTP_USER}}" target="user" />
+          <zeebe:input source="{{secrets.SMTP_PASSWORD}}" target="password" />
+          <zeebe:input source="replenishment-system@coldchain-replenishment.example" target="from" />
+          <zeebe:input source="=storeManagerEmail" target="to" />
+          <zeebe:input source="=&#34;Replenishment Completed Successfully: Store &#34; + storeId + &#34; (&#34; + requestId + &#34;)&#34;" target="subject" />
+          <zeebe:input source="=&#34;All replenishment shipments for request &#34; + requestId + &#34; have been received and 3-way matched. Results: &#34; + string(shipmentResults)" target="body" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_AllShipmentsOK</bpmn:incoming>
+      <bpmn:outgoing>Flow_SummaryOKToJoin</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <!-- Email Connector: Discrepancy Escalation Email -->
+    <bpmn:serviceTask id="Task_SendDiscrepancyEmail" name="Send Discrepancy Alert Email">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="io.camunda:email:1" />
+        <zeebe:ioMapping>
+          <zeebe:input source="{{secrets.SMTP_HOST}}" target="host" />
+          <zeebe:input source="{{secrets.SMTP_PORT}}" target="port" />
+          <zeebe:input source="{{secrets.SMTP_USER}}" target="user" />
+          <zeebe:input source="{{secrets.SMTP_PASSWORD}}" target="password" />
+          <zeebe:input source="replenishment-system@coldchain-replenishment.example" target="from" />
+          <zeebe:input source="=storeManagerEmail" target="to" />
+          <zeebe:input source="=&#34;ATTENTION: Replenishment Discrepancies Detected for Request &#34; + requestId" target="subject" />
+          <zeebe:input source="=&#34;One or more purchase orders encountered cold-chain rejections or invoice disputes. Detailed report: &#34; + string(shipmentResults)" target="body" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ShipmentsDiscrepancy</bpmn:incoming>
+      <bpmn:outgoing>Flow_DiscrepancyToJoin</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <!-- Exclusive Gateway Join before End -->
+    <bpmn:exclusiveGateway id="Gateway_FinalJoin" name="Join Final Completion" default="Flow_FinalJoinToEnd">
+      <bpmn:incoming>Flow_SummaryOKToJoin</bpmn:incoming>
+      <bpmn:incoming>Flow_DiscrepancyToJoin</bpmn:incoming>
+      <bpmn:outgoing>Flow_FinalJoinToEnd</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <!-- Final End Event -->
+    <bpmn:endEvent id="EndEvent_ReplenishmentCompleted" name="Replenishment Completed">
+      <bpmn:incoming>Flow_FinalJoinToEnd</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Top-Level Sequence Flows -->
+    <bpmn:sequenceFlow id="Flow_StartToReview" sourceRef="StartEvent_ReplenishmentRequested" targetRef="Task_ReviewRequest" />
+    <bpmn:sequenceFlow id="Flow_ReviewToGateway" sourceRef="Task_ReviewRequest" targetRef="Gateway_RequestApproved" />
+    <bpmn:sequenceFlow id="Flow_RequestApproved" name="Approved" sourceRef="Gateway_RequestApproved" targetRef="SubProcess_RFQPerSupplier" />
+    <bpmn:sequenceFlow id="Flow_RequestRejected" name="Rejected" sourceRef="Gateway_RequestApproved" targetRef="EndEvent_RequestRejected">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=requestApproved = false</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_RFQToQuoteGateway" sourceRef="SubProcess_RFQPerSupplier" targetRef="Gateway_AnyValidQuote" />
+    <bpmn:sequenceFlow id="Flow_ValidQuotesPresent" name="Quotes Received &gt; 0" sourceRef="Gateway_AnyValidQuote" targetRef="Task_RankSelectSuppliers">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=count(quotes[item.responded = true]) &gt; 0</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_NoQuotesAlert" name="No Valid Quotes" sourceRef="Gateway_AnyValidQuote" targetRef="Task_AlertNoQuotes" />
+    <bpmn:sequenceFlow id="Flow_AlertToNoQuotesEnd" sourceRef="Task_AlertNoQuotes" targetRef="EndEvent_NoQuotesEscalated" />
+    <bpmn:sequenceFlow id="Flow_RankToIssuePOs" sourceRef="Task_RankSelectSuppliers" targetRef="SubProcess_IssuePurchaseOrders" />
+    <bpmn:sequenceFlow id="Flow_IssuePOsToFulfilment" sourceRef="SubProcess_IssuePurchaseOrders" targetRef="SubProcess_ShipmentFulfilment" />
+    <bpmn:sequenceFlow id="Flow_FulfilmentToSummaryGateway" sourceRef="SubProcess_ShipmentFulfilment" targetRef="Gateway_ShipmentResultsSummary" />
+    <bpmn:sequenceFlow id="Flow_AllShipmentsOK" name="All Fulfilled &amp; Matched" sourceRef="Gateway_ShipmentResultsSummary" targetRef="Task_SendSummaryEmailOK" />
+    <bpmn:sequenceFlow id="Flow_ShipmentsDiscrepancy" name="Discrepancy or Rejection" sourceRef="Gateway_ShipmentResultsSummary" targetRef="Task_SendDiscrepancyEmail">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=some r in shipmentResults satisfies r.matchStatus = "DISPUTED" or r.status = "REJECTED" or r.status = "LATE"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_SummaryOKToJoin" sourceRef="Task_SendSummaryEmailOK" targetRef="Gateway_FinalJoin" />
+    <bpmn:sequenceFlow id="Flow_DiscrepancyToJoin" sourceRef="Task_SendDiscrepancyEmail" targetRef="Gateway_FinalJoin" />
+    <bpmn:sequenceFlow id="Flow_FinalJoinToEnd" sourceRef="Gateway_FinalJoin" targetRef="EndEvent_ReplenishmentCompleted" />
+
+  </bpmn:process>
+
+  <!-- Visual Diagram Information (BPMN DI) -->
+  <bpmndi:BPMNDiagram id="BPMNDiagram_ColdChainReplenishment">
+    <bpmndi:BPMNPlane id="BPMNPlane_ColdChainReplenishment" bpmnElement="coldChainReplenishment">
+
+      <!-- Top-Level Process Shapes -->
+      <bpmndi:BPMNShape id="Shape_StartEvent_ReplenishmentRequested" bpmnElement="StartEvent_ReplenishmentRequested">
+        <dc:Bounds x="160" y="322" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="144" y="365" width="70" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_ReviewRequest" bpmnElement="Task_ReviewRequest">
+        <dc:Bounds x="250" y="300" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_RequestApproved" bpmnElement="Gateway_RequestApproved" isMarkerVisible="true">
+        <dc:Bounds x="435" y="315" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="433" y="285" width="54" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_RequestRejected" bpmnElement="EndEvent_RequestRejected">
+        <dc:Bounds x="442" y="442" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="417" y="485" width="87" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- SubProcess_RFQPerSupplier -->
+      <bpmndi:BPMNShape id="Shape_SubProcess_RFQPerSupplier" bpmnElement="SubProcess_RFQPerSupplier" isExpanded="true">
+        <dc:Bounds x="540" y="160" width="870" height="360" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_StartEvent_RFQInstance" bpmnElement="StartEvent_RFQInstance">
+        <dc:Bounds x="572" y="302" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="557" y="345" width="67" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SendRFQEmail" bpmnElement="Task_SendRFQEmail">
+        <dc:Bounds x="650" y="280" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <!-- SubProcess_WaitForQuote Inside RFQ -->
+      <bpmndi:BPMNShape id="Shape_SubProcess_WaitForQuote" bpmnElement="SubProcess_WaitForQuote" isExpanded="true">
+        <dc:Bounds x="820" y="230" width="220" height="160" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_StartEvent_WaitSub" bpmnElement="StartEvent_WaitSub">
+        <dc:Bounds x="842" y="292" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="836" y="335" width="49" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Event_QuoteReceived" bpmnElement="Event_QuoteReceived">
+        <dc:Bounds x="912" y="292" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="892" y="335" width="77" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_WaitSub" bpmnElement="EndEvent_WaitSub">
+        <dc:Bounds x="982" y="292" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="966" y="335" width="69" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Boundary Event on WaitForQuote -->
+      <bpmndi:BPMNShape id="Shape_BoundaryEvent_QuoteTimeout" bpmnElement="BoundaryEvent_QuoteTimeout">
+        <dc:Bounds x="982" y="372" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="964" y="415" width="73" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetReceivedQuote" bpmnElement="Task_SetReceivedQuote">
+        <dc:Bounds x="1090" y="250" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetTimedOutQuote" bpmnElement="Task_SetTimedOutQuote">
+        <dc:Bounds x="1090" y="380" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_JoinQuoteOutcome" bpmnElement="Gateway_JoinQuoteOutcome" isMarkerVisible="true">
+        <dc:Bounds x="1255" y="295" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1253" y="265" width="54" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_RFQInstance" bpmnElement="EndEvent_RFQInstance">
+        <dc:Bounds x="1342" y="302" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1327" y="345" width="67" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Gateway_AnyValidQuote -->
+      <bpmndi:BPMNShape id="Shape_Gateway_AnyValidQuote" bpmnElement="Gateway_AnyValidQuote" isMarkerVisible="true">
+        <dc:Bounds x="1465" y="315" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1445" y="285" width="90" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_AlertNoQuotes" bpmnElement="Task_AlertNoQuotes">
+        <dc:Bounds x="1570" y="430" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_NoQuotesEscalated" bpmnElement="EndEvent_NoQuotesEscalated">
+        <dc:Bounds x="1762" y="452" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1749" y="495" width="63" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_RankSelectSuppliers" bpmnElement="Task_RankSelectSuppliers">
+        <dc:Bounds x="1570" y="300" width="140" height="80" />
+      </bpmndi:BPMNShape>
+
+      <!-- SubProcess_IssuePurchaseOrders (Sequential MI) -->
+      <bpmndi:BPMNShape id="Shape_SubProcess_IssuePurchaseOrders" bpmnElement="SubProcess_IssuePurchaseOrders" isExpanded="true">
+        <dc:Bounds x="1770" y="210" width="620" height="260" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_StartEvent_IssuePOInstance" bpmnElement="StartEvent_IssuePOInstance">
+        <dc:Bounds x="1802" y="312" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1788" y="355" width="65" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_PostPOToSupplierAPI" bpmnElement="Task_PostPOToSupplierAPI">
+        <dc:Bounds x="1880" y="290" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SendPOConfirmationEmail" bpmnElement="Task_SendPOConfirmationEmail">
+        <dc:Bounds x="2050" y="290" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetPOResult" bpmnElement="Task_SetPOResult">
+        <dc:Bounds x="2220" y="290" width="110" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_IssuePOInstance" bpmnElement="EndEvent_IssuePOInstance">
+        <dc:Bounds x="2362" y="312" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2343" y="355" width="75" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- SubProcess_ShipmentFulfilment (Parallel MI) -->
+      <bpmndi:BPMNShape id="Shape_SubProcess_ShipmentFulfilment" bpmnElement="SubProcess_ShipmentFulfilment" isExpanded="true">
+        <dc:Bounds x="2460" y="100" width="1680" height="640" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_StartEvent_ShipmentInstance" bpmnElement="StartEvent_ShipmentInstance">
+        <dc:Bounds x="2492" y="282" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2473" y="325" width="75" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Nested SubProcess_ColdChainTransit -->
+      <bpmndi:BPMNShape id="Shape_SubProcess_ColdChainTransit" bpmnElement="SubProcess_ColdChainTransit" isExpanded="true">
+        <dc:Bounds x="2570" y="130" width="1070" height="570" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_StartEvent_TransitActive" bpmnElement="StartEvent_TransitActive">
+        <dc:Bounds x="2602" y="232" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2591" y="275" width="58" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Event_ShipmentDelivered" bpmnElement="Event_ShipmentDelivered">
+        <dc:Bounds x="2682" y="232" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2677" y="275" width="47" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_FetchFinalTelemetry" bpmnElement="Task_FetchFinalTelemetry">
+        <dc:Bounds x="2760" y="210" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_CheckTempExceeded" bpmnElement="Gateway_CheckTempExceeded" isMarkerVisible="true">
+        <dc:Bounds x="2935" y="225" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2932" y="195" width="57" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_QAInspection" bpmnElement="Task_QAInspection">
+        <dc:Bounds x="3030" y="300" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_QAInspectionPassed" bpmnElement="Gateway_QAInspectionPassed" isMarkerVisible="true">
+        <dc:Bounds x="3195" y="315" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3184" y="285" width="73" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_TransitQARejected" bpmnElement="EndEvent_TransitQARejected">
+        <dc:Bounds x="3302" y="322" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3289" y="365" width="62" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_TransitTempJoin" bpmnElement="Gateway_TransitTempJoin" isMarkerVisible="true">
+        <dc:Bounds x="3395" y="225" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3379" y="195" width="82" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_TransitCompleted" bpmnElement="EndEvent_TransitCompleted">
+        <dc:Bounds x="3502" y="232" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3478" y="275" width="85" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- EventSubProcess_TempExcursion inside Transit -->
+      <bpmndi:BPMNShape id="Shape_EventSubProcess_TempExcursion" bpmnElement="EventSubProcess_TempExcursion" isExpanded="true">
+        <dc:Bounds x="2610" y="420" width="980" height="240" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_StartEvent_TempExcursion" bpmnElement="StartEvent_TempExcursion">
+        <dc:Bounds x="2642" y="512" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2620" y="555" width="80" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_FetchExcursionTelemetry" bpmnElement="Task_FetchExcursionTelemetry">
+        <dc:Bounds x="2720" y="490" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_AlertQAExcursion" bpmnElement="Task_AlertQAExcursion">
+        <dc:Bounds x="2890" y="490" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_QADecision" bpmnElement="Task_QADecision">
+        <dc:Bounds x="3050" y="490" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_ExcursionDecision" bpmnElement="Gateway_ExcursionDecision" isMarkerVisible="true">
+        <dc:Bounds x="3215" y="505" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3204" y="475" width="73" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_ExcursionRejected" bpmnElement="EndEvent_ExcursionRejected">
+        <dc:Bounds x="3332" y="582" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3327" y="625" width="46" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_ExcursionAccepted" bpmnElement="EndEvent_ExcursionAccepted">
+        <dc:Bounds x="3332" y="452" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3325" y="495" width="50" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Boundary Events on ColdChainTransit -->
+      <bpmndi:BPMNShape id="Shape_BoundaryEvent_DeliveryTimer" bpmnElement="BoundaryEvent_DeliveryTimer">
+        <dc:Bounds x="2702" y="682" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2688" y="725" width="65" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_BoundaryEvent_ShipmentRejected" bpmnElement="BoundaryEvent_ShipmentRejected">
+        <dc:Bounds x="3202" y="682" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3186" y="725" width="69" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Late delivery path elements -->
+      <bpmndi:BPMNShape id="Shape_Task_SlackLateDelivery" bpmnElement="Task_SlackLateDelivery">
+        <dc:Bounds x="2770" y="730" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_EmailSupplierLate" bpmnElement="Task_EmailSupplierLate">
+        <dc:Bounds x="2930" y="730" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetShipmentLateResult" bpmnElement="Task_SetShipmentLateResult">
+        <dc:Bounds x="3090" y="730" width="110" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_DeliveryLate" bpmnElement="EndEvent_DeliveryLate">
+        <dc:Bounds x="3242" y="752" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3228" y="795" width="65" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Rejection path elements -->
+      <bpmndi:BPMNShape id="Shape_Task_SlackShipmentRejected" bpmnElement="Task_SlackShipmentRejected">
+        <dc:Bounds x="3300" y="730" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_RestMarkPORejected" bpmnElement="Task_RestMarkPORejected">
+        <dc:Bounds x="3460" y="730" width="120" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SetShipmentRejectedResult" bpmnElement="Task_SetShipmentRejectedResult">
+        <dc:Bounds x="3620" y="730" width="110" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_ShipmentRejected" bpmnElement="EndEvent_ShipmentRejected">
+        <dc:Bounds x="3772" y="752" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3764" y="795" width="52" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Post-Transit Elements -->
+      <bpmndi:BPMNShape id="Shape_Task_ConfirmGoodsReceipt" bpmnElement="Task_ConfirmGoodsReceipt">
+        <dc:Bounds x="3680" y="260" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_CallActivity_ThreeWayMatch" bpmnElement="CallActivity_ThreeWayMatch">
+        <dc:Bounds x="3850" y="260" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_AssembleShipmentResult" bpmnElement="Task_AssembleShipmentResult">
+        <dc:Bounds x="4010" y="260" width="110" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_ShipmentInstanceEnd" bpmnElement="EndEvent_ShipmentInstanceEnd">
+        <dc:Bounds x="4152" y="282" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="4127" y="325" width="87" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Top-Level Summarization Shapes -->
+      <bpmndi:BPMNShape id="Shape_Gateway_ShipmentResultsSummary" bpmnElement="Gateway_ShipmentResultsSummary" isMarkerVisible="true">
+        <dc:Bounds x="4195" y="315" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="4178" y="285" width="85" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SendSummaryEmailOK" bpmnElement="Task_SendSummaryEmailOK">
+        <dc:Bounds x="4290" y="240" width="140" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SendDiscrepancyEmail" bpmnElement="Task_SendDiscrepancyEmail">
+        <dc:Bounds x="4290" y="370" width="140" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_FinalJoin" bpmnElement="Gateway_FinalJoin" isMarkerVisible="true">
+        <dc:Bounds x="4485" y="315" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="4485" y="285" width="50" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_ReplenishmentCompleted" bpmnElement="EndEvent_ReplenishmentCompleted">
+        <dc:Bounds x="4592" y="322" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="4574" y="365" width="73" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Edge Waypoints -->
+      <bpmndi:BPMNEdge id="Edge_Flow_StartToReview" bpmnElement="Flow_StartToReview">
+        <di:waypoint x="196" y="340" />
+        <di:waypoint x="250" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_ReviewToGateway" bpmnElement="Flow_ReviewToGateway">
+        <di:waypoint x="380" y="340" />
+        <di:waypoint x="435" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_RequestApproved" bpmnElement="Flow_RequestApproved">
+        <di:waypoint x="485" y="340" />
+        <di:waypoint x="540" y="340" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="489" y="322" width="48" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_RequestRejected" bpmnElement="Flow_RequestRejected">
+        <di:waypoint x="460" y="365" />
+        <di:waypoint x="460" y="442" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="468" y="393" width="44" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_RFQToQuoteGateway" bpmnElement="Flow_RFQToQuoteGateway">
+        <di:waypoint x="1410" y="340" />
+        <di:waypoint x="1465" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_ValidQuotesPresent" bpmnElement="Flow_ValidQuotesPresent">
+        <di:waypoint x="1515" y="340" />
+        <di:waypoint x="1570" y="340" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1505" y="315" width="86" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_NoQuotesAlert" bpmnElement="Flow_NoQuotesAlert">
+        <di:waypoint x="1490" y="365" />
+        <di:waypoint x="1490" y="470" />
+        <di:waypoint x="1570" y="470" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1497" y="443" width="79" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_AlertToNoQuotesEnd" bpmnElement="Flow_AlertToNoQuotesEnd">
+        <di:waypoint x="1700" y="470" />
+        <di:waypoint x="1762" y="470" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_RankToIssuePOs" bpmnElement="Flow_RankToIssuePOs">
+        <di:waypoint x="1710" y="340" />
+        <di:waypoint x="1770" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_IssuePOsToFulfilment" bpmnElement="Flow_IssuePOsToFulfilment">
+        <di:waypoint x="2390" y="340" />
+        <di:waypoint x="2460" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_FulfilmentToSummaryGateway" bpmnElement="Flow_FulfilmentToSummaryGateway">
+        <di:waypoint x="4140" y="340" />
+        <di:waypoint x="4195" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_AllShipmentsOK" bpmnElement="Flow_AllShipmentsOK">
+        <di:waypoint x="4220" y="315" />
+        <di:waypoint x="4220" y="280" />
+        <di:waypoint x="4290" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="4226" y="260" width="67" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_ShipmentsDiscrepancy" bpmnElement="Flow_ShipmentsDiscrepancy">
+        <di:waypoint x="4220" y="365" />
+        <di:waypoint x="4220" y="410" />
+        <di:waypoint x="4290" y="410" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="4222" y="380" width="76" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SummaryOKToJoin" bpmnElement="Flow_SummaryOKToJoin">
+        <di:waypoint x="4430" y="280" />
+        <di:waypoint x="4510" y="280" />
+        <di:waypoint x="4510" y="315" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_DiscrepancyToJoin" bpmnElement="Flow_DiscrepancyToJoin">
+        <di:waypoint x="4430" y="410" />
+        <di:waypoint x="4510" y="410" />
+        <di:waypoint x="4510" y="365" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_FinalJoinToEnd" bpmnElement="Flow_FinalJoinToEnd">
+        <di:waypoint x="4535" y="340" />
+        <di:waypoint x="4592" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Inside RFQ SubProcess Edges -->
+      <bpmndi:BPMNEdge id="Edge_Flow_RFQStartToSendEmail" bpmnElement="Flow_RFQStartToSendEmail">
+        <di:waypoint x="608" y="320" />
+        <di:waypoint x="650" y="320" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SendEmailToWaitSub" bpmnElement="Flow_SendEmailToWaitSub">
+        <di:waypoint x="770" y="320" />
+        <di:waypoint x="820" y="320" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_WaitStartToCatch" bpmnElement="Flow_WaitStartToCatch">
+        <di:waypoint x="878" y="310" />
+        <di:waypoint x="912" y="310" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_CatchToWaitEnd" bpmnElement="Flow_CatchToWaitEnd">
+        <di:waypoint x="948" y="310" />
+        <di:waypoint x="982" y="310" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_WaitSubToSetReceived" bpmnElement="Flow_WaitSubToSetReceived">
+        <di:waypoint x="1040" y="290" />
+        <di:waypoint x="1090" y="290" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_TimeoutToSetTimedOut" bpmnElement="Flow_TimeoutToSetTimedOut">
+        <di:waypoint x="1000" y="408" />
+        <di:waypoint x="1000" y="420" />
+        <di:waypoint x="1090" y="420" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SetReceivedToJoin" bpmnElement="Flow_SetReceivedToJoin">
+        <di:waypoint x="1210" y="290" />
+        <di:waypoint x="1280" y="290" />
+        <di:waypoint x="1280" y="295" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SetTimedOutToJoin" bpmnElement="Flow_SetTimedOutToJoin">
+        <di:waypoint x="1210" y="420" />
+        <di:waypoint x="1280" y="420" />
+        <di:waypoint x="1280" y="345" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_QuoteJoinToEnd" bpmnElement="Flow_QuoteJoinToEnd">
+        <di:waypoint x="1305" y="320" />
+        <di:waypoint x="1342" y="320" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Inside Sequential PO SubProcess Edges -->
+      <bpmndi:BPMNEdge id="Edge_Flow_IssuePOStartToPost" bpmnElement="Flow_IssuePOStartToPost">
+        <di:waypoint x="1838" y="330" />
+        <di:waypoint x="1880" y="330" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_PostPOToSendEmail" bpmnElement="Flow_PostPOToSendEmail">
+        <di:waypoint x="2010" y="330" />
+        <di:waypoint x="2050" y="330" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SendEmailToSetResult" bpmnElement="Flow_SendEmailToSetResult">
+        <di:waypoint x="2180" y="330" />
+        <di:waypoint x="2220" y="330" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SetResultToPOEnd" bpmnElement="Flow_SetResultToPOEnd">
+        <di:waypoint x="2330" y="330" />
+        <di:waypoint x="2362" y="330" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Inside Shipment Fulfilment Edges -->
+      <bpmndi:BPMNEdge id="Edge_Flow_ShipmentStartToTransit" bpmnElement="Flow_ShipmentStartToTransit">
+        <di:waypoint x="2528" y="300" />
+        <di:waypoint x="2570" y="300" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_TransitToGoodsReceipt" bpmnElement="Flow_TransitToGoodsReceipt">
+        <di:waypoint x="3640" y="300" />
+        <di:waypoint x="3680" y="300" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_GoodsReceiptToCallActivity" bpmnElement="Flow_GoodsReceiptToCallActivity">
+        <di:waypoint x="3810" y="300" />
+        <di:waypoint x="3850" y="300" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_CallActivityToAssembleResult" bpmnElement="Flow_CallActivityToAssembleResult">
+        <di:waypoint x="3980" y="300" />
+        <di:waypoint x="4010" y="300" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_AssembleResultToEnd" bpmnElement="Flow_AssembleResultToEnd">
+        <di:waypoint x="4120" y="300" />
+        <di:waypoint x="4152" y="300" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Inside Cold-Chain Transit Edges -->
+      <bpmndi:BPMNEdge id="Edge_Flow_TransitStartToCatchDelivered" bpmnElement="Flow_TransitStartToCatchDelivered">
+        <di:waypoint x="2638" y="250" />
+        <di:waypoint x="2682" y="250" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_DeliveredToFetchTelemetry" bpmnElement="Flow_DeliveredToFetchTelemetry">
+        <di:waypoint x="2718" y="250" />
+        <di:waypoint x="2760" y="250" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_FetchToTempCheckGateway" bpmnElement="Flow_FetchToTempCheckGateway">
+        <di:waypoint x="2890" y="250" />
+        <di:waypoint x="2935" y="250" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_TempNormal" bpmnElement="Flow_TempNormal">
+        <di:waypoint x="2985" y="250" />
+        <di:waypoint x="3395" y="250" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3000" y="232" width="65" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_TempExceeded" bpmnElement="Flow_TempExceeded">
+        <di:waypoint x="2960" y="275" />
+        <di:waypoint x="2960" y="340" />
+        <di:waypoint x="3030" y="340" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2965" y="306" width="67" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_QAInspectionToGateway" bpmnElement="Flow_QAInspectionToGateway">
+        <di:waypoint x="3150" y="340" />
+        <di:waypoint x="3195" y="340" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_QAInspectionPassed" bpmnElement="Flow_QAInspectionPassed">
+        <di:waypoint x="3220" y="315" />
+        <di:waypoint x="3220" y="270" />
+        <di:waypoint x="3400" y="270" />
+        <di:waypoint x="3400" y="255" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3225" y="252" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_QAInspectionReject" bpmnElement="Flow_QAInspectionReject">
+        <di:waypoint x="3245" y="340" />
+        <di:waypoint x="3302" y="340" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3240" y="322" width="66" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_TempJoinToEnd" bpmnElement="Flow_TempJoinToEnd">
+        <di:waypoint x="3445" y="250" />
+        <di:waypoint x="3502" y="250" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Event SubProcess Inside Transit Edges -->
+      <bpmndi:BPMNEdge id="Edge_Flow_ExcursionStartToFetch" bpmnElement="Flow_ExcursionStartToFetch">
+        <di:waypoint x="2678" y="530" />
+        <di:waypoint x="2720" y="530" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_FetchToSlackAlert" bpmnElement="Flow_FetchToSlackAlert">
+        <di:waypoint x="2850" y="530" />
+        <di:waypoint x="2890" y="530" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SlackToQADecision" bpmnElement="Flow_SlackToQADecision">
+        <di:waypoint x="3010" y="530" />
+        <di:waypoint x="3050" y="530" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_QADecisionToGateway" bpmnElement="Flow_QADecisionToGateway">
+        <di:waypoint x="3170" y="530" />
+        <di:waypoint x="3215" y="530" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_ExcursionAccept" bpmnElement="Flow_ExcursionAccept">
+        <di:waypoint x="3240" y="505" />
+        <di:waypoint x="3240" y="470" />
+        <di:waypoint x="3332" y="470" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3243" y="453" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_ExcursionReject" bpmnElement="Flow_ExcursionReject">
+        <di:waypoint x="3240" y="555" />
+        <di:waypoint x="3240" y="600" />
+        <di:waypoint x="3332" y="600" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3244" y="603" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+
+      <!-- Boundary Event Edges on ColdChainTransit -->
+      <bpmndi:BPMNEdge id="Edge_Flow_LateTimerToSlack" bpmnElement="Flow_LateTimerToSlack">
+        <di:waypoint x="2720" y="718" />
+        <di:waypoint x="2720" y="770" />
+        <di:waypoint x="2770" y="770" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SlackToEmailLateSupplier" bpmnElement="Flow_SlackToEmailLateSupplier">
+        <di:waypoint x="2890" y="770" />
+        <di:waypoint x="2930" y="770" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_EmailLateToSetResult" bpmnElement="Flow_EmailLateToSetResult">
+        <di:waypoint x="3050" y="770" />
+        <di:waypoint x="3090" y="770" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_LateResultToEnd" bpmnElement="Flow_LateResultToEnd">
+        <di:waypoint x="3200" y="770" />
+        <di:waypoint x="3242" y="770" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_RejectedToSlack" bpmnElement="Flow_RejectedToSlack">
+        <di:waypoint x="3220" y="718" />
+        <di:waypoint x="3220" y="770" />
+        <di:waypoint x="3300" y="770" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_SlackToRestRejectPO" bpmnElement="Flow_SlackToRestRejectPO">
+        <di:waypoint x="3420" y="770" />
+        <di:waypoint x="3460" y="770" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_RestRejectToSetResult" bpmnElement="Flow_RestRejectToSetResult">
+        <di:waypoint x="3580" y="770" />
+        <di:waypoint x="3620" y="770" />
+      </bpmndi:BPMNEdge>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_RejectedResultToEnd" bpmnElement="Flow_RejectedResultToEnd">
+        <di:waypoint x="3730" y="770" />
+        <di:waypoint x="3772" y="770" />
+      </bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

@@ -1,0 +1,68 @@
+{
+  "executionPlatform": "Camunda Cloud",
+  "executionPlatformVersion": "8.5.0",
+  "exporter": {
+    "name": "Camunda Modeler",
+    "version": "5.25.0"
+  },
+  "schemaVersion": 16,
+  "id": "reviewReplenishmentRequest",
+  "components": [
+    {
+      "text": "# Review & Approve Replenishment Request\nPlease verify the store's cold-chain replenishment parameters and budget cap before issuing RFQs to regional suppliers.",
+      "type": "text",
+      "id": "Text_Header"
+    },
+    {
+      "label": "Request ID",
+      "type": "textfield",
+      "id": "Field_RequestId",
+      "key": "requestId",
+      "disabled": true
+    },
+    {
+      "label": "Store ID",
+      "type": "textfield",
+      "id": "Field_StoreId",
+      "key": "storeId",
+      "disabled": true
+    },
+    {
+      "label": "Store Manager Email",
+      "type": "textfield",
+      "id": "Field_StoreManagerEmail",
+      "key": "storeManagerEmail",
+      "disabled": true
+    },
+    {
+      "label": "Maximum Permissible Transit Temperature (°C)",
+      "type": "number",
+      "id": "Field_MaxTransitTempC",
+      "key": "maxTransitTempC",
+      "disabled": true
+    },
+    {
+      "label": "Total Allocated Budget Cap (USD)",
+      "type": "number",
+      "id": "Field_BudgetCap",
+      "key": "budgetCap",
+      "disabled": true
+    },
+    {
+      "label": "Approve Replenishment Request",
+      "type": "checkbox",
+      "id": "Field_RequestApproved",
+      "key": "requestApproved",
+      "defaultValue": true,
+      "description": "Check to dispatch RFQs to approved dairy and produce suppliers. Uncheck to reject request immediately."
+    },
+    {
+      "label": "Review Comments",
+      "type": "textarea",
+      "id": "Field_ReviewComments",
+      "key": "reviewComments",
+      "description": "Optional notes or rejection rationale"
+    }
+  ],
+  "type": "default"
+}

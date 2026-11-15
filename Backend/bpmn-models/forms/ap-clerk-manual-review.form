@@ -1,0 +1,103 @@
+{
+  "executionPlatform": "Camunda Cloud",
+  "executionPlatformVersion": "8.5.0",
+  "exporter": {
+    "name": "Camunda Modeler",
+    "version": "5.25.0"
+  },
+  "schemaVersion": 16,
+  "id": "apClerkManualReview",
+  "components": [
+    {
+      "text": "## Accounts Payable: Three-Way Match Mismatch Review\nAutomated reconciliation failed because quantity counts did not match or invoice dollar variance exceeded the 2% allowable threshold.",
+      "type": "text",
+      "id": "Text_APHeader"
+    },
+    {
+      "label": "Purchase Order Number",
+      "type": "textfield",
+      "id": "Field_PONumber",
+      "key": "poNumber",
+      "disabled": true
+    },
+    {
+      "label": "Supplier Invoice Number",
+      "type": "textfield",
+      "id": "Field_InvoiceNumber",
+      "key": "invoiceNumber",
+      "disabled": true
+    },
+    {
+      "label": "Ordered Quantity",
+      "type": "number",
+      "id": "Field_OrderedQty",
+      "key": "orderedQty",
+      "disabled": true
+    },
+    {
+      "label": "Actual Received Quantity",
+      "type": "number",
+      "id": "Field_ReceivedQty",
+      "key": "receivedQty",
+      "disabled": true
+    },
+    {
+      "label": "Quantity Variance",
+      "type": "number",
+      "id": "Field_QuantityVariance",
+      "key": "quantityVariance",
+      "disabled": true
+    },
+    {
+      "label": "Authorized PO Amount (USD)",
+      "type": "number",
+      "id": "Field_OrderedAmount",
+      "key": "orderedAmount",
+      "disabled": true
+    },
+    {
+      "label": "Invoiced Amount (USD)",
+      "type": "number",
+      "id": "Field_InvoiceAmount",
+      "key": "invoiceAmount",
+      "disabled": true
+    },
+    {
+      "label": "Dollar Variance (USD)",
+      "type": "number",
+      "id": "Field_AmountVariance",
+      "key": "amountVariance",
+      "disabled": true
+    },
+    {
+      "label": "AP Clerk Decision",
+      "type": "radio",
+      "id": "Field_APDecision",
+      "key": "apDecision",
+      "defaultValue": "DISPUTE",
+      "values": [
+        {
+          "label": "Approve Override (Accept variance with accounting adjustment)",
+          "value": "APPROVE"
+        },
+        {
+          "label": "Dispute Invoice (Hold payment and request credit memo from supplier)",
+          "value": "DISPUTE"
+        }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "label": "AP Reviewer Notes & Justification",
+      "type": "textarea",
+      "id": "Field_APNotes",
+      "key": "apNotes",
+      "validate": {
+        "required": true
+      }
+    }
+  ],
+  "type": "default"
+}

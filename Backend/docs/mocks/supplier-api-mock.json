@@ -1,0 +1,40 @@
+{
+  "description": "Mock responses and WireMock mappings for Regional Supplier Purchase Order REST API",
+  "endpoints": [
+    {
+      "method": "POST",
+      "urlPattern": "/api/v1/orders",
+      "scenario": "Purchase Order Accepted by Supplier",
+      "responseStatus": 201,
+      "responseHeaders": {
+        "Content-Type": "application/json"
+      },
+      "responseBody": {
+        "status": "CONFIRMED",
+        "poNumber": "PO-REQ-1001-SUP-A",
+        "supplierId": "SUP-A",
+        "confirmationNumber": "SUP-CONF-88219",
+        "scheduledDispatchTime": "2026-11-16T04:00:00Z",
+        "estimatedDeliveryTime": "2026-11-16T08:30:00Z",
+        "coldChainRefrigeratedTruckId": "TRK-COLD-14"
+      }
+    },
+    {
+      "method": "POST",
+      "urlPattern": "/api/v1/orders/(.*)/reject",
+      "scenario": "Mark Purchase Order Rejected Due to Excursion",
+      "responseStatus": 200,
+      "responseHeaders": {
+        "Content-Type": "application/json"
+      },
+      "responseBody": {
+        "status": "REJECTED_ACKNOWLEDGED",
+        "poNumber": "PO-REQ-1001-SUP-B",
+        "disputeReferenceNumber": "DISP-2026-9901",
+        "creditMemoAuthorized": true,
+        "salvageInspectionRequired": true,
+        "message": "Supplier acknowledged quality rejection. Credit note will be issued pending disposal manifest."
+      }
+    }
+  ]
+}
